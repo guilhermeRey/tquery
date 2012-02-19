@@ -193,9 +193,19 @@ tQuery.pluginsOn(tQuery, tQuery);
 
 tQuery.mixinAttributes	= function(dstObject, properties){
 	dstObject.prototype.attr	= function(name, value){
+		// handle parameters
+		if( name instanceof Object && value === undefined ){
+			Object.keys(name).forEach(function(key){
+				this.attr(key, name[key]);
+			}.bind(this));
+		}else if( typeof(name) === 'string' ){
+			console.assert( Object.keys(properties).indexOf(name) !== -1, 'invalid property name:'+name);
+		}else	console.assert(false, 'invalid parameter');
+
 		// handle setter
 		if( value !== undefined ){
-			console.log("name", name, value);
+			var convertFn	= properties[name];
+			value		= convertFn(value);
 			this.each(function(element){
 				element[name]	= value;
 			})
@@ -205,15 +215,110 @@ tQuery.mixinAttributes	= function(dstObject, properties){
 		if( this.length === 0 )	return undefined
 		var element	= this.get(0);
 		return element[name];
-	}
+	};
 
 	// add shortcuts
 	Object.keys(properties).forEach(function(name){
 		dstObject.prototype[name]	= function(value){
 			return this.attr(name, value);
 		};
-	});
-};/**
+	}.bind(this));
+};
+
+//////////////////////////////////////////////////////////////////////////////////
+//		put some helpers						//
+//////////////////////////////////////////////////////////////////////////////////
+
+/**
+ * Flow control - from https://github.com/jeromeetienne/gowiththeflow.js
+*/
+tQuery.Flow	= function(){
+	var self, stack = [], timerId = setTimeout(function(){ timerId = null; self._next(); }, 0);
+	return self = {
+		destroy	: function(){ timerId && clearTimeout(timerId);	},
+		par	: function(callback, isSeq){
+			if(isSeq || !(stack[stack.length-1] instanceof Array)) stack.push([]);
+			stack[stack.length-1].push(callback);
+			return self;
+		},seq	: function(callback){ return self.par(callback, true);	},
+		_next	: function(err, result){
+			var errors = [], results = [], callbacks = stack.shift() || [], nbReturn = callbacks.length, isSeq = nbReturn == 1;
+			callbacks && callbacks.forEach(function(fct, index){
+				fct(function(error, result){
+					errors[index]	= error;
+					results[index]	= result;		
+					if(--nbReturn == 0)	self._next(isSeq?errors[0]:errors, isSeq?results[0]:results)
+				}, err, result)
+			})
+		}
+	}
+};
+
+/**
+ * microevents.js - https://github.com/jeromeetienne/microevent.js
+*/
+tQuery.MicroeventMixin	= function(destObj){
+	destObj.bind	= function(event, fct){
+		if(this._events === undefined) 	this._events	= {};
+		this._events[event] = this._events[event]	|| [];
+		this._events[event].push(fct);
+		return fct;
+	};
+	destObj.unbind	= function(event, fct){
+		if(this._events === undefined) 	this._events	= {};
+		if( event in this._events === false  )	return;
+		this._events[event].splice(this._events[event].indexOf(fct), 1);
+	};
+	destObj.trigger	= function(event /* , args... */){
+		if(this._events === undefined) 	this._events	= {};
+		if( this._events[event] === undefined )	return;
+		var tmpArray	= this._events[event].slice(); 
+		for(var i = 0; i < tmpArray.length; i++){
+			tmpArray[i].apply(this, Array.prototype.slice.call(arguments, 1))
+		}
+	}
+};
+
+tQuery.convert	= {};
+
+/**
+ * Convert the value into a THREE.Color object
+ * 
+ * @return {THREE.Color} the resulting color
+*/
+tQuery.convert.toThreeColor	= function(value){
+	if( arguments.length === 1 && typeof(value) === 'number'){
+		return new THREE.Color(value);
+	}else if( arguments.length === 1 && value instanceof THREE.Color ){
+		return value;
+	}else{
+		console.assert(false, "invalid parameter");
+	}
+	return undefined;	// never reached - just to workaround linter complaint
+};
+
+tQuery.convert.toNumber	= function(value){
+	if( arguments.length === 1 && typeof(value) === 'number'){
+		return value;
+	}else{
+		console.assert(false, "invalid parameter");
+	}
+	return undefined;	// never reached - just to workaround linter complaint
+};
+
+tQuery.convert.identity	= function(value){
+	return value;
+};
+
+tQuery.convert.toBool	= function(value){
+	if( arguments.length === 1 && typeof(value) === 'boolean'){
+		return value;
+	}else{
+		console.assert(false, "invalid parameter");
+	}
+	return undefined;	// never reached - just to workaround linter complaint
+};
+/**
  * implementation of the tQuery.Node
  *
  * @class base class for tQuery objects
@@ -540,7 +645,13 @@ tQuery.Object3D._removeClassOne	= function(object3d, className){
 tQuery.Object3D._select	= function(selector, root){
 	root		= root	|| tQuery.world.scene();
 	var selectItems	= selector.split(' ').filter(function(v){ return v.length > 0;})
-	var lists	= this._crawls(root, selectItems)
+
+	var lists	= [];	
+	root.children.forEach(function(child){
+		var nodes	= this._crawls(child, selectItems);
+		// FIXME reallocate the array without need
+		lists		= lists.concat(nodes);
+	}.bind(this));	
 	return lists;
 }
 
@@ -672,7 +783,16 @@ tQuery.inherit(tQuery.Material, tQuery.Node);
 /**
  * Make it pluginable
 */
-tQuery.pluginsInstanceOn(tQuery.Material);/**
+tQuery.pluginsInstanceOn(tQuery.Material);
+
+/**
+ * define all acceptable attributes for this class
+*/
+tQuery.mixinAttributes(tQuery.Material, {
+	opacity		: tQuery.convert.toNumber,
+	transparent	: tQuery.convert.toBool
+});
+/**
  * Handle light
  *
  * @class include THREE.Light. It inherit from {@link tQuery.Node}
@@ -707,7 +827,7 @@ tQuery.pluginsInstanceOn(tQuery.Light);
  * define all acceptable attributes for this class
 */
 tQuery.mixinAttributes(tQuery.Light, {
-	color	: true
+	color	: tQuery.convert.toThreeColor
 });
 
 
@@ -803,16 +923,21 @@ tQuery.World	= function()
 // make it pluginable
 tQuery.pluginsInstanceOn(tQuery.World);
 
+// make it eventable
+tQuery.MicroeventMixin(tQuery.World.prototype)
 
-tQuery.World.prototype.destroy	= function()
-{
+
+tQuery.World.prototype.destroy	= function(){
+	// microevent.js notification
+	this.trigger('destroy');
+	// destroy the loop
 	this._loop.destroy();
 	// remove renderer element
 	var parent	= this._renderer.domElement.parentElement;
 	parent	&& parent.removeChild(this._renderer.domElement);
 	
+	// clear the global if needed
 	if( tQuery.world === this )	tQuery.world = null;
-
 }
 
 //////////////////////////////////////////////////////////////////////////////////
@@ -1306,8 +1431,47 @@ tQuery.pluginsInstanceOn(tQuery.DirectionalLight);
  * define all acceptable attributes for this class
 */
 tQuery.mixinAttributes(tQuery.DirectionalLight, {
-	intensity	: true,
-	distance	: true
+	intensity	: tQuery.convert.toNumber,
+	distance	: tQuery.convert.toNumber
+});
+
+
+/**
+ * Handle directional light
+ *
+ * @class include THREE.PointLight. It inherit from {@link tQuery.Light}
+ * 
+ * @borrows tQuery.Node#get as this.get
+ * @borrows tQuery.Node#each as this.each
+ * @borrows tQuery.Node#back as this.back
+ *
+ * @param {THREE.PointLight} element an instance or array of instance
+*/
+tQuery.PointLight	= function(elements)
+{
+	// call parent ctor
+	tQuery.PointLight.parent.constructor.call(this, elements)
+
+	// sanity check - all items MUST be THREE.Light
+	this._lists.forEach(function(item){ console.assert(item instanceof THREE.PointLight); });
+};
+
+/**
+ * inherit from tQuery.Light
+*/
+tQuery.inherit(tQuery.PointLight, tQuery.Light);
+
+/**
+ * Make it pluginable
+*/
+tQuery.pluginsInstanceOn(tQuery.PointLight);
+
+/**
+ * define all acceptable attributes for this class
+*/
+tQuery.mixinAttributes(tQuery.PointLight, {
+	intensity	: tQuery.convert.toNumber,
+	distance	: tQuery.convert.toNumber
 });
 
 
@@ -1322,7 +1486,7 @@ tQuery.mixinAttributes(tQuery.DirectionalLight, {
 */
 var DragPanControls	= function(loop)
 {
-	this._loop	= loop	|| tQuery.loop;
+	this._loop	= loop	|| tQuery.world.loop();
 
 	this._controls	= new THREEx.DragPanControls(tQuery.world.camera());
 	this._$onRender	= this._onRender.bind(this);
@@ -1347,7 +1511,7 @@ tQuery.register('createDragPanControls', function(loop){ return new tQuery.DragP
  * @fileOverview Plugins for tQuery.Geometry: tool box to play with geometry
 */
 
-(function(){
+(function(){	// TODO why is there a closure here ?
 
 //////////////////////////////////////////////////////////////////////////////////
 //		Size functions							//
@@ -1551,7 +1715,7 @@ tQuery.Geometry.register('zoomZ'	, function(ratio){ return this.zoom(1, 1, ratio
  * @fileOverview Plugins for tQuery.Object3D to play with .position/.rotation/.scale
 */
 
-(function(){
+(function(){	// TODO why is there a closure here ?
 
 //////////////////////////////////////////////////////////////////////////////////
 //		set function							//
@@ -1678,42 +1842,5 @@ tQuery.Object3D.register('zoom'		, function(value){ return this.scaleBy(value);	
 tQuery.Object3D.register('zoomX'	, function(ratio){ return this.zoom(ratio, 1, 1);	});
 tQuery.Object3D.register('zoomY'	, function(ratio){ return this.zoom(1, ratio, 1);	});
 tQuery.Object3D.register('zoomZ'	, function(ratio){ return this.zoom(1, 1, ratio);	});
-
-})();	// closure function end
-/**
- * @fileOverview Plugins for tQuery and Stats.js
-*/
-
-(function(){
-
-/**
- * 
-*/
-var myStats	= function(loop)
-{
-	// add Stats.js - https://github.com/mrdoob/stats.js
-	this._stats	= new Stats();
-	this._stats.domElement.style.position	= 'absolute';
-	this._stats.domElement.style.bottom	= '0px';
-	document.body.appendChild( this._stats.domElement );
-
-	this._loop	= loop	|| tQuery.world.loop();
-
-	this._$onRender	= this._onRender.bind(this);
-	this._loop.hookPostRender(this._$onRender);
-}
-
-myStats.prototype.destroy	= function(){
-	this._loop.unhookPostRender(this._$onRender);	
-	document.body.removeChild(this._stats.domElement );
-}
-
-myStats.prototype._onRender	= function(){
-	this._stats.update();
-};
-
-// register the plugins
-tQuery.register('Stats', myStats);
-tQuery.register('createStats', function(loop){ return new tQuery.Stats(loop); });
 
 })();	// closure function end
